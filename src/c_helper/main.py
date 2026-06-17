@@ -115,6 +115,24 @@ class AIClient:
             return content.strip()
         return self._sanitize(content)
 
+    def health_check(self) -> tuple[bool, str]:
+        """启动时检查 API 可用性。返回 (是否可用, 状态信息)。"""
+        try:
+            url = f"{self.base_url}/models"
+            resp = self.session.get(url, timeout=(5, 10))
+            if resp.status_code == 200:
+                return True, "API 连接正常"
+            elif resp.status_code == 401:
+                return False, "API Key 无效或已过期"
+            else:
+                return False, f"API 返回状态码 {resp.status_code}"
+        except requests.exceptions.ConnectionError:
+            return False, "无法连接到 API 服务器，请检查网络或 base_url"
+        except requests.exceptions.Timeout:
+            return False, "API 连接超时"
+        except Exception as e:
+            return False, f"API 检查失败: {e}"
+
     @staticmethod
     def _sanitize(text: str) -> str:
         """
