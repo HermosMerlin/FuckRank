@@ -10,9 +10,9 @@ gh repo clone HermosMerlin/FuckMati
 cd FuckMati
 
 # 2. 创建虚拟环境并安装依赖
-uv venv
+python -m venv .venv
 .venv\Scripts\activate
-uv pip install -e ".[dev]"
+pip install -e ".[dev]"
 
 # 3. 第一次运行会自动生成 config.json，编辑填入你的 api_key
 notepad config.json
