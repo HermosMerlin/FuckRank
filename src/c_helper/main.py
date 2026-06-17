@@ -172,14 +172,14 @@ class AIClient:
 
 
 def _fix_indent(lines: list[str]) -> list[str]:
-    """将混合 tab/不规则空格缩进修复为标准的 4 空格层级。"""
+    """修复缩进：把绝对缩进转为相对缩进，然后减半抵消编辑器的自动补全。"""
     if not lines:
         return lines
 
-    # 先全部展开为空格（tab = 4 空格）
+    # tab → 4 空格
     expanded = [line.replace("\t", "    ") for line in lines]
 
-    # 计算非空行的最小前导空格
+    # 收集非空行缩进
     indents = []
     for line in expanded:
         stripped = line.lstrip(" ")
@@ -189,33 +189,30 @@ def _fix_indent(lines: list[str]) -> list[str]:
         return expanded
 
     min_indent = min(indents)
-    unique_indents = sorted(set(indents))
 
-    # 如果最小缩进不是 0，全部左移
+    # 左移，最小缩进归零
     if min_indent > 0:
         expanded = [line[min_indent:] if line.strip() else line for line in expanded]
-        unique_indents = [i - min_indent for i in unique_indents]
+        indents = [i - min_indent for i in indents]
 
-    # 检测缩进步长：通常是 4 或 8
-    # 如果检测到 8 空格为主，说明 AI/编辑器用了 8 空格缩进，转为 4
-    step = 4
-    if len(unique_indents) > 1:
-        gaps = [unique_indents[i + 1] - unique_indents[i] for i in range(len(unique_indents) - 1)]
-        if gaps and all(g % 8 == 0 for g in gaps if g > 0):
-            step = 8
+    max_indent = max(indents)
 
-    if step == 8:
-        # 8 空格 → 4 空格：层级减半
+    # 如果最大缩进 >= 8，说明 AI 用了 8 空格或编辑器叠加了自动缩进
+    # 全部缩进减半（8→4, 12→6→4, 16→8→4）
+    if max_indent >= 8:
         fixed = []
         for line in expanded:
             stripped = line.lstrip(" ")
             if stripped:
-                level = (len(line) - len(stripped)) // 8
+                spaces = len(line) - len(stripped)
+                # 四舍五入到最近的 4 的倍数层级
+                level = max(0, round(spaces / 8))
                 fixed.append("    " * level + stripped)
             else:
                 fixed.append(line)
         return fixed
 
+    # max_indent < 8：保持原样（可能是 4 空格标准缩进）
     return expanded
 
     def health_check(self) -> tuple[bool, str]:
