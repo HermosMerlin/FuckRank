@@ -6,7 +6,7 @@
 
 ```powershell
 # 1. 克隆
-gh repo clone HermosMerlin/FuckMati
+git clone https://github.com/HermosMerlin/FuckMati.git
 cd FuckMati
 
 # 2. 创建虚拟环境并安装依赖
