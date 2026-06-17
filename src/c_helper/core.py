@@ -32,6 +32,7 @@ class Config:
     long_pause_min_ms: int
     long_pause_max_ms: int
     output_mode: str
+    editor_auto_brace: bool
     system_prompt: str
 
     _DEFAULT_CONFIG = {
@@ -46,6 +47,7 @@ class Config:
         "long_pause_min_ms": 3000,
         "long_pause_max_ms": 12000,
         "output_mode": "optimized",
+        "editor_auto_brace": True,
         "system_prompt": (
             "你是一位C语言编程专家。用户会粘贴一道C语言题目，"
             "请直接给出完整、可编译的C语言代码作为答案。"
@@ -77,6 +79,7 @@ class Config:
             long_pause_min_ms=data.get("long_pause_min_ms", 3000),
             long_pause_max_ms=data.get("long_pause_max_ms", 12000),
             output_mode=data.get("output_mode", "optimized"),
+            editor_auto_brace=data.get("editor_auto_brace", True),
             system_prompt=data.get(
                 "system_prompt",
                 cls._DEFAULT_CONFIG["system_prompt"],

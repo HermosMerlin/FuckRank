@@ -30,6 +30,7 @@ class TestAIClient:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         client = AIClient(config)
@@ -60,6 +61,7 @@ class TestAIClient:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         client = AIClient(config)
@@ -88,6 +90,7 @@ class TestTyper:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="",
         )
         typer = Typer(config)
@@ -116,6 +119,7 @@ class TestTyper:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="",
         )
         typer = Typer(config)
@@ -142,6 +146,7 @@ class TestWorker:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         sm = MagicMock()
@@ -177,6 +182,7 @@ class TestWorker:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         sm = MagicMock()
@@ -206,6 +212,7 @@ class TestWorker:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         sm = MagicMock()
@@ -241,6 +248,7 @@ class TestAppInitialization:
             long_pause_min_ms=3000,
             long_pause_max_ms=12000,
             output_mode="optimized",
+            editor_auto_brace=False,
             system_prompt="test",
         )
         mock_config_load.return_value = mock_config
@@ -250,7 +258,118 @@ class TestAppInitialization:
         assert app.sm.state == State.IDLE
 
 
-class TestSanitize:
+class TestTypeTextAdvanced:
+    @patch("c_helper.main._get_foreground_layout")
+    @patch("c_helper.main._set_foreground_layout")
+    @patch("c_helper.main.Controller")
+    def test_type_text_zero_indent_optimized(self, mock_controller_cls, mock_set, mock_get) -> None:
+        """optimized 模式下 type_text 应去掉每行前导空格"""
+        mock_get.return_value = 0x04090409
+        mock_controller = MagicMock()
+        mock_controller_cls.return_value = mock_controller
+
+        config = Config(
+            api_key="", base_url="", model="",
+            typing_delay_ms=10, typing_jitter=False,
+            typing_jitter_range_ms=0,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="optimized", editor_auto_brace=False,
+            system_prompt="",
+        )
+        typer = Typer(config)
+        typer.type_text("    int a;\n        int b;")
+        # 不应输出前导空格（空格会被 lstrip 掉）
+        calls = [c[0][0] for c in mock_controller.type.call_args_list]
+        # 检查 "int a;" 的字符序列存在（不检查连续，因为可能分散在多个调用中）
+        assert "i" in calls
+        assert "n" in calls
+        assert "t" in calls
+        # 不应有大量前导空格调用
+        space_count = calls.count(" ")
+        assert space_count < 4  # 最多几个单词间空格，不应有4个连续缩进空格
+        # 检查 "int b;" 的字符也存在
+        assert "b" in calls
+
+    @patch("c_helper.main._get_foreground_layout")
+    @patch("c_helper.main._set_foreground_layout")
+    @patch("c_helper.main.Controller")
+    def test_type_text_preserves_indent_raw(self, mock_controller_cls, mock_set, mock_get) -> None:
+        """raw 模式下 type_text 应保留前导空格"""
+        mock_get.return_value = 0x04090409
+        mock_controller = MagicMock()
+        mock_controller_cls.return_value = mock_controller
+
+        config = Config(
+            api_key="", base_url="", model="",
+            typing_delay_ms=10, typing_jitter=False,
+            typing_jitter_range_ms=0,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="raw", editor_auto_brace=False,
+            system_prompt="",
+        )
+        typer = Typer(config)
+        typer.type_text("    int a;")
+        calls = [c[0][0] for c in mock_controller.type.call_args_list]
+        # raw 模式下保留空格，应有 4 个空格字符调用
+        assert calls.count(" ") >= 4
+
+    @patch("c_helper.main._get_foreground_layout")
+    @patch("c_helper.main._set_foreground_layout")
+    @patch("c_helper.main.Controller")
+    def test_type_text_auto_brace(self, mock_controller_cls, mock_set, mock_get) -> None:
+        """editor_auto_brace=True 时，输出 { 后应发送 End + Backspace"""
+        mock_get.return_value = 0x04090409
+        mock_controller = MagicMock()
+        mock_controller_cls.return_value = mock_controller
+
+        config = Config(
+            api_key="", base_url="", model="",
+            typing_delay_ms=10, typing_jitter=False,
+            typing_jitter_range_ms=0,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="optimized", editor_auto_brace=True,
+            system_prompt="",
+        )
+        typer = Typer(config)
+        typer.type_text("if (1) {\n    int a;\n}")
+
+        # 验证 press/release Key.end 被调用
+        from pynput.keyboard import Key
+        mock_controller.press.assert_any_call(Key.end)
+        mock_controller.release.assert_any_call(Key.end)
+        mock_controller.press.assert_any_call(Key.backspace)
+        mock_controller.release.assert_any_call(Key.backspace)
+
+    @patch("c_helper.main._get_foreground_layout")
+    @patch("c_helper.main._set_foreground_layout")
+    @patch("c_helper.main.Controller")
+    def test_type_text_no_auto_brace(self, mock_controller_cls, mock_set, mock_get) -> None:
+        """editor_auto_brace=False 时，不应发送 End + Backspace"""
+        mock_get.return_value = 0x04090409
+        mock_controller = MagicMock()
+        mock_controller_cls.return_value = mock_controller
+
+        config = Config(
+            api_key="", base_url="", model="",
+            typing_delay_ms=10, typing_jitter=False,
+            typing_jitter_range_ms=0,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="optimized", editor_auto_brace=False,
+            system_prompt="",
+        )
+        typer = Typer(config)
+        typer.type_text("if (1) {\n    int a;\n}")
+
+        from pynput.keyboard import Key
+        # 不应调用 Key.end 或 Key.backspace
+        for call in mock_controller.press.call_args_list:
+            assert call[0][0] != Key.end
+        for call in mock_controller.release.call_args_list:
+            assert call[0][0] != Key.backspace
     def test_sanitize_removes_markdown_fence(self) -> None:
         raw = "```c\nint main() {}\n```"
         assert AIClient._sanitize(raw) == "int main() {}"
@@ -273,10 +392,11 @@ int main() {
         assert lines[-1].strip() == "}"
         assert lines[-2].strip() == "return 0;"
 
-    def test_sanitize_fixes_indent(self) -> None:
-        """8 空格缩进 → 4 空格缩进"""
+    def test_sanitize_preserves_indent(self) -> None:
+        """_sanitize 只负责去围栏和平衡大括号，不处理缩进"""
         raw = "int main() {\n        int a;\n        if (1) {\n                int b;\n        }\n}"
         result = AIClient._sanitize(raw)
         lines = result.splitlines()
-        assert lines[1] == "    int a;"
-        assert lines[3] == "        int b;"
+        # 缩进保持不变（由 type_text 在输出时处理）
+        assert lines[1] == "        int a;"
+        assert lines[3] == "                int b;"

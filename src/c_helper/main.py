@@ -23,7 +23,7 @@ import pyperclip
 import pystray
 import requests
 from pynput import keyboard as pk
-from pynput.keyboard import Controller, HotKey, Listener
+from pynput.keyboard import Controller, HotKey, Key, Listener
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -95,10 +95,17 @@ class AIClient:
 
     def ask(self, question: str) -> str:
         """发送非流式请求，返回清洗后的纯文本。"""
+        system_content = self.config.system_prompt
+        if self.config.output_mode == "optimized":
+            system_content += (
+                "\n\n格式要求：使用K&R风格大括号（左大括号不换行，紧跟在控制语句同一行末尾），"
+                "输出代码时不要包含任何前导空格或缩进，所有代码顶格输出，让编辑器自动处理缩进。"
+            )
+
         payload = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": question},
             ],
             "temperature": 0.2,
@@ -138,9 +145,9 @@ class AIClient:
         """
         清洗 AI 返回的 Markdown/网页编辑器污染：
         - 去掉 ```c / ``` 围栏标记
-        - 修复不规则缩进（统一为 4 空格）
         - 删除末尾多余的孤立大括号（平衡检查）
         - 去掉尾部空行与反引号残留
+        注意：缩进由 type_text 在输出时处理，此处不修改。
         """
         text = text.strip()
 
@@ -148,7 +155,7 @@ class AIClient:
         text = re.sub(r"^```\w*\s*", "", text)
         text = re.sub(r"\s*```\s*$", "", text)
 
-        # 2. 去掉末尾空行和反引号残留（保留大括号，下一步再平衡）
+        # 2. 去掉末尾空行和反引号残留
         lines = text.splitlines()
         while lines and lines[-1].strip() in ("", "```", "`"):
             lines.pop()
@@ -165,74 +172,7 @@ class AIClient:
                     continue
             break
 
-        # 4. 修复缩进：统一为 4 空格层级
-        lines = _fix_indent(lines)
-
         return "\n".join(lines)
-
-
-def _fix_indent(lines: list[str]) -> list[str]:
-    """修复缩进：把绝对缩进转为相对缩进，然后减半抵消编辑器的自动补全。"""
-    if not lines:
-        return lines
-
-    # tab → 4 空格
-    expanded = [line.replace("\t", "    ") for line in lines]
-
-    # 收集非空行缩进
-    indents = []
-    for line in expanded:
-        stripped = line.lstrip(" ")
-        if stripped:
-            indents.append(len(line) - len(stripped))
-    if not indents:
-        return expanded
-
-    min_indent = min(indents)
-
-    # 左移，最小缩进归零
-    if min_indent > 0:
-        expanded = [line[min_indent:] if line.strip() else line for line in expanded]
-        indents = [i - min_indent for i in indents]
-
-    max_indent = max(indents)
-
-    # 如果最大缩进 >= 8，说明 AI 用了 8 空格或编辑器叠加了自动缩进
-    # 全部缩进减半（8→4, 12→6→4, 16→8→4）
-    if max_indent >= 8:
-        fixed = []
-        for line in expanded:
-            stripped = line.lstrip(" ")
-            if stripped:
-                spaces = len(line) - len(stripped)
-                # 四舍五入到最近的 4 的倍数层级
-                level = max(0, round(spaces / 8))
-                fixed.append("    " * level + stripped)
-            else:
-                fixed.append(line)
-        return fixed
-
-    # max_indent < 8：保持原样（可能是 4 空格标准缩进）
-    return expanded
-
-    def health_check(self) -> tuple[bool, str]:
-        """启动时检查 API 可用性。返回 (是否可用, 状态信息)。"""
-        try:
-            # 尝试访问 /models 端点验证认证和网络
-            url = f"{self.base_url}/models"
-            resp = self.session.get(url, timeout=(5, 10))
-            if resp.status_code == 200:
-                return True, "API 连接正常"
-            elif resp.status_code == 401:
-                return False, "API Key 无效或已过期"
-            else:
-                return False, f"API 返回状态码 {resp.status_code}"
-        except requests.exceptions.ConnectionError:
-            return False, "无法连接到 API 服务器，请检查网络或 base_url"
-        except requests.exceptions.Timeout:
-            return False, "API 连接超时"
-        except Exception as e:
-            return False, f"API 检查失败: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +197,10 @@ class Typer:
         if not text:
             return
 
+        # optimized 模式：去掉每行前导空格，让编辑器自动缩进接管
+        if self.config.output_mode == "optimized":
+            text = "\n".join(line.lstrip() for line in text.splitlines())
+
         base_delay = self.config.typing_delay_ms / 1000.0
         jitter = self.config.typing_jitter_range_ms / 1000.0 if self.config.typing_jitter else 0.0
 
@@ -269,6 +213,13 @@ class Typer:
 
             for ch in text:
                 self.controller.type(ch)
+
+                # editor_auto_brace：输出 { 后删除编辑器自动补全的 }
+                if ch == "{" and self.config.editor_auto_brace:
+                    self.controller.press(Key.end)
+                    self.controller.release(Key.end)
+                    self.controller.press(Key.backspace)
+                    self.controller.release(Key.backspace)
 
                 delay = base_delay
                 if jitter:
