@@ -163,31 +163,48 @@ class StateMachine:
 # ---------------------------------------------------------------------------
 class IconRenderer:
     """
-    为系统托盘生成 16x16 RGBA 图标。
-    使用低饱和度莫兰迪色系，确保隐蔽不刺眼。
+    托盘图标渲染器 — 伪装成云盘后台应用。
+
+    设计：
+      - 主体：固定浅灰蓝色云朵（像 OneDrive/坚果云）
+      - 状态：右下角 5px 彩色圆点 + 白色描边，使用者能清晰辨识
+      - 第三者视角：只是一个普通的云同步后台图标
     """
 
-    _PALETTE = {
-        State.IDLE:       "#9CA3AF",  # 中性灰
-        State.REQUESTING: "#D4A373",  # 暗沙金
-        State.READY:      "#81B29A",  # 灰绿
-        State.TYPING:     "#8D99AE",  # 灰蓝
-        State.ERROR:      "#E07A5F",  # 砖红
+    _CLOUD_COLOR = "#94A3B8"  # 浅灰蓝，类似常见云盘图标
+
+    _DOT_PALETTE = {
+        State.IDLE:       "#475569",  # 深灰 — 检测 API 中
+        State.REQUESTING: "#D4A373",  # 暗沙金 — 请求中
+        State.READY:      "#6BCB9F",  # 薄荷绿 — 就绪
+        State.TYPING:     "#8D99AE",  # 灰蓝 — 输出中
+        State.ERROR:      "#E07A5F",  # 砖红 — 错误
     }
 
     _SIZE = 16
 
     @classmethod
     def render(cls, state: State) -> Image.Image:
-        hex_color = cls._PALETTE.get(state, cls._PALETTE[State.IDLE])
-        rgb = tuple(int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
         img = Image.new("RGBA", (cls._SIZE, cls._SIZE), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        # 实心圆角矩形，完全填充，无描边，无文字
-        margin = 2
-        draw.rounded_rectangle(
-            (margin, margin, cls._SIZE - margin, cls._SIZE - margin),
-            radius=4,
-            fill=(*rgb, 255),
-        )
+
+        # 1. 绘制云朵主体（3 个重叠圆模拟）
+        cloud = cls._CLOUD_COLOR
+        # 底部宽椭圆
+        draw.ellipse((1, 8, 15, 14), fill=cloud)
+        # 左凸起
+        draw.ellipse((2, 5, 8, 11), fill=cloud)
+        # 右凸起
+        draw.ellipse((6, 5, 12, 11), fill=cloud)
+        # 顶部小凸起
+        draw.ellipse((4, 3, 10, 9), fill=cloud)
+
+        # 2. 右下角状态圆点（带 1px 白色描边，增加辨识度）
+        dot_color = cls._DOT_PALETTE.get(state, cls._DOT_PALETTE[State.IDLE])
+        cx, cy, r = 12, 12, 3
+        # 白色描边
+        draw.ellipse((cx - r - 1, cy - r - 1, cx + r + 1, cy + r + 1), fill="#FFFFFF")
+        # 彩色圆点
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=dot_color)
+
         return img

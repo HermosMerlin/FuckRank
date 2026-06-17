@@ -353,6 +353,10 @@ class Worker:
             return
         self.tray.set_state(State.TYPING)
 
+        # 给输入法/焦点切换留出 2 秒缓冲，避免首字符丢失
+        log.info("2 秒后开始输出...")
+        time.sleep(2)
+
         try:
             text = self._cached_answer
             if text:

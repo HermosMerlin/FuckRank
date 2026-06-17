@@ -184,9 +184,10 @@ class TestWorker:
         assert worker._cached_answer == ""
         sm.transition.assert_any_call(State.ERROR)
 
+    @patch("c_helper.main.time.sleep")
     @patch("c_helper.main.Typer")
     @patch.object(TrayManager, "set_state")
-    def test_do_type(self, mock_set_state, mock_typer_cls) -> None:
+    def test_do_type(self, mock_set_state, mock_typer_cls, mock_sleep) -> None:
         config = Config(
             api_key="sk",
             base_url="https://api.openai.com/v1",
