@@ -6,8 +6,8 @@
 
 ```powershell
 # 1. 克隆
-git clone https://github.com/HermosMerlin/FuckMati.git
-cd FuckMati
+git clone https://github.com/HermosMerlin/FuckRank.git
+cd FuckRank
 
 # 2. 创建虚拟环境并安装依赖
 python -m venv .venv
