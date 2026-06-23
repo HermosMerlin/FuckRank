@@ -489,6 +489,48 @@ class TestWorkerManualMode:
         assert worker._manual_answer == "abc"
         assert worker._manual_idx == 0
 
+    def test_start_manual_strips_leading_whitespace_in_optimized(self) -> None:
+        """optimized 模式下 _start_manual 应去掉每行前导空格（与 type_text 一致）。"""
+        config = Config(
+            api_key="sk", base_url="", model="",
+            typing_delay_ms=80, typing_jitter=True, typing_jitter_range_ms=20,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="optimized", editor_auto_brace=False,
+            system_prompt="test", typing_mode="manual",
+        )
+        sm = MagicMock()
+        sm.state = State.READY
+        sm.transition.return_value = True
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        worker = Worker(config, sm, tray)
+        worker._cached_answer = "  int x;\n  return 0;"
+
+        worker.handle_hotkey()
+
+        assert worker._manual_answer == "int x;\nreturn 0;"
+
+    def test_start_manual_preserves_whitespace_in_raw(self) -> None:
+        """raw 模式下 _start_manual 不应去掉前导空格。"""
+        config = Config(
+            api_key="sk", base_url="", model="",
+            typing_delay_ms=80, typing_jitter=True, typing_jitter_range_ms=20,
+            long_pause_enabled=False, long_pause_chance=0.0,
+            long_pause_min_ms=3000, long_pause_max_ms=12000,
+            output_mode="raw", editor_auto_brace=False,
+            system_prompt="test", typing_mode="manual",
+        )
+        sm = MagicMock()
+        sm.state = State.READY
+        sm.transition.return_value = True
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        worker = Worker(config, sm, tray)
+        worker._cached_answer = "  int x;\n  return 0;"
+
+        worker.handle_hotkey()
+
+        assert worker._manual_answer == "  int x;\n  return 0;"
+
     def test_type_next_char_advances_and_exhausts(self) -> None:
         config = Config(
             api_key="sk", base_url="https://api.openai.com/v1", model="gpt-4",

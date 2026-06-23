@@ -413,7 +413,11 @@ class Worker:
         if not self.sm.transition(State.TYPING):
             return
         self.tray.set_state(State.TYPING)
-        self._manual_answer = self._cached_answer
+        # optimized 模式：去掉每行前导空格，让编辑器自动缩进接管（与 type_text 一致）
+        text = self._cached_answer
+        if self.config.output_mode == "optimized":
+            text = "\n".join(line.lstrip() for line in text.splitlines())
+        self._manual_answer = text
         self._manual_idx = 0
         self._manual_active = True
         log.info("进入手动输出模式，按 a-z 逐字输出，ESC 终止")
