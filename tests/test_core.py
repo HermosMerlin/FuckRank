@@ -15,6 +15,7 @@ class TestConfig:
         cfg = Config.load(config_path)
         assert cfg.base_url == ""
         assert cfg.model == ""
+        assert cfg.typing_mode == "auto"
         # 非api字段应使用当前 config.json 的调优值作为模板
         assert cfg.typing_delay_ms == 300
         assert cfg.typing_jitter is True
@@ -27,6 +28,7 @@ class TestConfig:
             "api_key": "sk-test",
             "base_url": "http://localhost:11434/v1",
             "model": "llama3",
+            "typing_mode": "manual",
             "typing_delay_ms": 50,
             "typing_jitter": False,
             "typing_jitter_range_ms": 10,
@@ -35,6 +37,7 @@ class TestConfig:
         cfg = Config.load(config_path)
         assert cfg.api_key == "sk-test"
         assert cfg.base_url == "http://localhost:11434/v1"
+        assert cfg.typing_mode == "manual"
         assert cfg.typing_jitter is False
         assert cfg.typing_delay_ms == 50
 
@@ -45,16 +48,17 @@ class TestConfig:
         assert config_path.exists()  # 自动创建了模板
         assert cfg.api_key == ""  # 默认空值
         assert cfg.base_url == ""
+        assert cfg.typing_mode == "auto"
 
     def test_load_empty_file_creates_template(self, tmp_path: Path) -> None:
         """空文件（0 字节）不应崩溃，应重写为完整模板。"""
         config_path = tmp_path / "config.json"
         config_path.write_text("", encoding="utf-8")  # 空文件
         cfg = Config.load(config_path)
-        # 文件应被重写为完整模板（13 个键）
+        # 文件应被重写为完整模板（14 个键）
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert set(data.keys()) == {
-            "api_key", "base_url", "model",
+            "api_key", "base_url", "model", "typing_mode",
             "typing_delay_ms", "typing_jitter", "typing_jitter_range_ms",
             "long_pause_enabled", "long_pause_chance", "long_pause_min_ms", "long_pause_max_ms",
             "output_mode", "editor_auto_brace", "system_prompt",
