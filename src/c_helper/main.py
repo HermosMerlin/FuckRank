@@ -488,7 +488,7 @@ class HotkeyManager:
                 return False
             hotkey.release(self._listener.canonical(key))
 
-        self._listener = Listener(on_press=on_press, on_release=on_release, event_filter=self._event_filter)
+        self._listener = Listener(on_press=on_press, on_release=on_release, win32_event_filter=self._event_filter)
         self._listener.start()
         log.info("热键 Ctrl+Alt+G 已注册")
         self._listener.join()

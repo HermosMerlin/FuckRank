@@ -657,3 +657,24 @@ class TestHotkeyManagerEventFilter:
             mock_submit.assert_not_called()
             hm._listener.suppress_event.assert_not_called()
             assert result is None
+
+    def test_win32_event_filter_kwarg_is_required(self) -> None:
+        """回归：pynput 在 Windows 上要求 event_filter 使用 win32_ 前缀。
+
+        不带前缀的 event_filter kwarg 会被 _base.Listener.__init__ 静默丢弃
+        （只保留以 win32_ 开头的 kwargs 到 _options），导致 _event_filter
+        永远是默认 lambda，event_filter 回调从不被调用，按键抑制完全失效。
+        """
+        from pynput.keyboard import Listener
+
+        def custom_filter(msg, data):
+            return None
+
+        # 带前缀：自定义 filter 被正确存储
+        l = Listener(on_press=lambda k: None, win32_event_filter=custom_filter)
+        assert l._event_filter is custom_filter
+
+        # 不带前缀：被静默丢弃，_event_filter 是默认 lambda
+        l2 = Listener(on_press=lambda k: None, event_filter=custom_filter)
+        assert l2._event_filter is not custom_filter
+        assert "event_filter" not in l2._options
