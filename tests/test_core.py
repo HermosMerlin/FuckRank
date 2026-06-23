@@ -13,8 +13,8 @@ class TestConfig:
         config_path = tmp_path / "config.json"
         config_path.write_text(json.dumps({}), encoding="utf-8")
         cfg = Config.load(config_path)
-        assert cfg.base_url == "https://api.openai.com/v1"
-        assert cfg.model == "gpt-4o-mini"
+        assert cfg.base_url == ""
+        assert cfg.model == ""
         # 非api字段应使用当前 config.json 的调优值作为模板
         assert cfg.typing_delay_ms == 300
         assert cfg.typing_jitter is True
@@ -44,7 +44,7 @@ class TestConfig:
         cfg = Config.load(config_path)
         assert config_path.exists()  # 自动创建了模板
         assert cfg.api_key == ""  # 默认空值
-        assert cfg.base_url == "https://api.openai.com/v1"
+        assert cfg.base_url == ""
 
     def test_load_empty_file_creates_template(self, tmp_path: Path) -> None:
         """空文件（0 字节）不应崩溃，应重写为完整模板。"""
@@ -72,8 +72,8 @@ class TestConfig:
         # 文件应被重写为合法 JSON 模板
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert "system_prompt" in data
-        assert cfg.base_url == "https://api.openai.com/v1"
-        assert cfg.model == "gpt-4o-mini"
+        assert cfg.base_url == ""
+        assert cfg.model == ""
 
 
 class TestStateMachine:

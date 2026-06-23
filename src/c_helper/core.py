@@ -37,8 +37,8 @@ class Config:
 
     _DEFAULT_CONFIG = {
         "api_key": "",
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o-mini",
+        "base_url": "",
+        "model": "",
         "typing_delay_ms": 300,
         "typing_jitter": True,
         "typing_jitter_range_ms": 100,
@@ -81,8 +81,8 @@ class Config:
 
         return cls(
             api_key=data.get("api_key", ""),
-            base_url=data.get("base_url", "https://api.openai.com/v1"),
-            model=data.get("model", "gpt-4o-mini"),
+            base_url=data.get("base_url", ""),
+            model=data.get("model", ""),
             typing_delay_ms=data.get("typing_delay_ms", 300),
             typing_jitter=data.get("typing_jitter", True),
             typing_jitter_range_ms=data.get("typing_jitter_range_ms", 100),
