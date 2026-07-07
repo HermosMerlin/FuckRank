@@ -22,8 +22,7 @@ from typing import Optional
 import pyperclip
 import pystray
 import requests
-from pynput import keyboard as pk
-from pynput.keyboard import Controller, HotKey, Key, Listener
+from pynput.keyboard import Controller, Key, Listener
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -183,15 +182,20 @@ class Typer:
         self.config = config
         self.controller = Controller()
 
+    def prepare_text(self, text: str) -> str:
+        """根据 output_mode 预处理文本。optimized 模式下去掉每行前导空格。"""
+        if self.config.output_mode == "optimized":
+            return "\n".join(line.lstrip() for line in text.splitlines())
+        return text
+
     def type_char(self, ch: str) -> None:
-        """输出单个字符，不含延迟和布局切换。"""
-        self.controller.type(ch)
-        # editor_auto_brace：输出 { 后删除编辑器自动补全的 }
-        if ch == "{" and self.config.editor_auto_brace:
-            self.controller.press(Key.end)
-            self.controller.release(Key.end)
-            self.controller.press(Key.backspace)
-            self.controller.release(Key.backspace)
+        """输出单个字符，不含延迟和布局切换。
+        换行符显式用 press/release(Key.enter)，避免 controller.type("\n") 隐式映射的不确定性。"""
+        if ch == "\n":
+            self.controller.press(Key.enter)
+            self.controller.release(Key.enter)
+        else:
+            self.controller.type(ch)
 
     def type_text(self, text: str) -> None:
         """
@@ -207,9 +211,7 @@ class Typer:
         if not text:
             return
 
-        # optimized 模式：去掉每行前导空格，让编辑器自动缩进接管
-        if self.config.output_mode == "optimized":
-            text = "\n".join(line.lstrip() for line in text.splitlines())
+        text = self.prepare_text(text)
 
         base_delay = self.config.typing_delay_ms / 1000.0
         jitter = self.config.typing_jitter_range_ms / 1000.0 if self.config.typing_jitter else 0.0
@@ -275,7 +277,7 @@ class TrayManager:
         self.icon = pystray.Icon(
             "c_helper",
             IconRenderer.render(State.IDLE),
-            title="C Helper — Ctrl+Alt+G",
+            title="C Helper — Tab+G",
             menu=menu,
         )
         # 应用启动前缓存的状态
@@ -413,11 +415,7 @@ class Worker:
         if not self.sm.transition(State.TYPING):
             return
         self.tray.set_state(State.TYPING)
-        # optimized 模式：去掉每行前导空格，让编辑器自动缩进接管（与 type_text 一致）
-        text = self._cached_answer
-        if self.config.output_mode == "optimized":
-            text = "\n".join(line.lstrip() for line in text.splitlines())
-        self._manual_answer = text
+        self._manual_answer = self.typer.prepare_text(self._cached_answer)
         self._manual_idx = 0
         self._manual_active = True
         log.info("进入手动输出模式，按 a-z 逐字输出，ESC 终止")
@@ -459,17 +457,22 @@ class Worker:
 # ---------------------------------------------------------------------------
 class HotkeyManager:
     """
-    Ctrl+Alt+G 全局热键。
+    Tab+G 全局热键。
     Windows WH_KEYBOARD_LL 必须在主线程运行，因此 Listener 在主线程阻塞。
     热键回调只做一件事：向 Worker Queue 投递轻量任务，绝不阻塞。
+
+    因为 Tab 是破坏性按键（会切换焦点），不能直接用 pynput HotKey.parse。
+    改用 win32_event_filter 手动追踪 Tab 状态并抑制 Tab 按键。
     """
 
     _WM_KEYDOWN = 256
     _WM_SYSKEYDOWN = 260
     _LLKHF_INJECTED = 0x10
     _VK_ESCAPE = 0x1B
+    _VK_TAB = 0x09
     _VK_A = 0x41
     _VK_Z = 0x5A
+    _VK_G = 0x47
 
     def __init__(self, worker: Worker, tray: TrayManager):
         self.worker = worker
@@ -477,53 +480,59 @@ class HotkeyManager:
         self._listener: Optional[Listener] = None
         self._last_ms = 0.0
         self._debounce_ms = 300.0
-        self._running = True
+        self._tab_held = False
 
     def start(self) -> None:
-        hotkey = HotKey(HotKey.parse("<ctrl>+<alt>+g"), self._on_combo)
-
-        def on_press(key):
-            if not self._running:
-                return False
-            hotkey.press(self._listener.canonical(key))
-
-        def on_release(key):
-            if not self._running:
-                return False
-            hotkey.release(self._listener.canonical(key))
-
-        self._listener = Listener(on_press=on_press, on_release=on_release, win32_event_filter=self._event_filter)
+        self._listener = Listener(on_press=self._on_press, win32_event_filter=self._event_filter)
         self._listener.start()
-        log.info("热键 Ctrl+Alt+G 已注册")
+        log.info("热键 Tab+G 已注册")
         self._listener.join()
         log.info("热键监听已结束")
 
     def _event_filter(self, msg, data):
-        # 只在手动模式 TYPING 状态下拦截
-        if self.worker.config.typing_mode != "manual":
-            return None
-        if self.worker.sm.state is not State.TYPING:
-            return None
-        # 跳过注入事件（我们自己 Controller.type 产生的）
-        if data.flags & self._LLKHF_INJECTED:
-            return None
-        # 只处理 key-down
-        if msg not in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN):
-            return None
         vk = data.vkCode
-        if vk == self._VK_ESCAPE:  # ESC → 终止
-            self.worker.submit(self.worker._terminate_manual)
+
+        # 全局：抑制 Tab 键，防止热键触发时切换焦点
+        if vk == self._VK_TAB:
+            if data.flags & self._LLKHF_INJECTED:
+                return None  # 放过注入事件（模拟键盘）
+            if msg == self._WM_KEYDOWN or msg == self._WM_SYSKEYDOWN:
+                self._tab_held = True
+            else:
+                self._tab_held = False
             self._listener.suppress_event()
             return
-        if self._VK_A <= vk <= self._VK_Z:  # a-z → 输出下一字符
-            self.worker.submit(self.worker._type_next_char)
-            self._listener.suppress_event()
+
+        # 手动模式 TYPING 状态下的特殊处理
+        if self.worker.config.typing_mode == "manual" and self.worker.sm.state is State.TYPING:
+            if data.flags & self._LLKHF_INJECTED:
+                return None
+            if msg not in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN):
+                return None
+            if vk == self._VK_ESCAPE:  # ESC → 终止
+                self.worker.submit(self.worker._terminate_manual)
+                self._listener.suppress_event()
+                return
+            if self._VK_A <= vk <= self._VK_Z:  # a-z → 输出下一字符
+                self.worker.submit(self.worker._type_next_char)
+                self._listener.suppress_event()
+                return
+            # 其他按键放行（Enter, Backspace, 方向键等）
+            return None
+
+        return None  # 放行
+
+    def _on_press(self, key) -> None:
+        # 手动模式 TYPING 状态下不检查热键（按键已由 event_filter 处理）
+        if self.worker.sm.state is State.TYPING and self.worker.config.typing_mode == "manual":
             return
-        # 其他按键放行（Enter, Backspace, 方向键等）
-        return None
+        # 检测 Tab+G 组合：Tab 已被 event_filter 标记为 held
+        if not self._tab_held:
+            return
+        if hasattr(key, 'vk') and key.vk == self._VK_G or getattr(key, 'char', '') == 'g':
+            self._on_combo()
 
     def stop(self) -> None:
-        self._running = False
         if self._listener:
             self._listener.stop()
 
@@ -574,7 +583,7 @@ class App:
         # 启动后台 API 健康检测
         threading.Thread(target=self._health_check_loop, daemon=True).start()
 
-        log.info("C Helper 已启动，按 Ctrl+Alt+G 开始")
+        log.info("C Helper 已启动，按 Tab+G 开始")
         # 主线程阻塞在 Listener（WH_KEYBOARD_LL 要求）
         self.hotkey.start()
 
