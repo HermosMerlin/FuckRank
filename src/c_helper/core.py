@@ -48,7 +48,7 @@ class Config:
         "long_pause_min_ms": 3000,
         "long_pause_max_ms": 12000,
         "output_mode": "optimized",
-        "editor_auto_brace": True,
+        "editor_auto_brace": False,
         "typing_mode": "manual",
         "system_prompt": (
             "你是一位C语言编程专家。用户会粘贴一道C语言题目，"
