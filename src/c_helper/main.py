@@ -27,9 +27,28 @@ from pynput.keyboard import Controller, HotKey, Key, Listener
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from c_helper.core import Config, IconRenderer, State, StateMachine
+from c_helper.core import (
+    Answer,
+    AnswerKind,
+    Config,
+    IconRenderer,
+    State,
+    StateMachine,
+    parse_answer,
+)
 
 log = logging.getLogger("c_helper")
+
+# 题型协议：由代码追加到用户 system_prompt 之后，保证选择题/判断题可解析。
+_ANSWER_PROTOCOL = (
+    "\n\n先判断题目类型，并严格按以下格式回答：\n"
+    "1. 单选题：第一行只输出 [[CHOICE:选项字母]]，例如 [[CHOICE:A]]。\n"
+    "2. 判断题（包括 A. 正确 / B. 错误 形式）：第一行只输出 [[BOOL:T]] 或 [[BOOL:F]]。\n"
+    "3. 多选题：不要作答，第一行只输出 [[UNSUPPORTED]]。\n"
+    "4. 代码题：不要输出任何类型标记，直接按用户要求输出代码。\n"
+    "只支持单选题的 A–D 四个选项；如果题目有 5 个及以上选项，也输出 [[UNSUPPORTED]]。\n"
+    "不要输出选项原文、解释或 Markdown 代码围栏。"
+)
 
 # ---------------------------------------------------------------------------
 # Windows API — 强制英文布局（避免中文IME干扰键盘模拟）
@@ -101,6 +120,8 @@ class AIClient:
                 "\n\n格式要求：使用K&R风格大括号（左大括号不换行，紧跟在控制语句同一行末尾），"
                 "输出代码时不要包含任何前导空格或缩进，所有代码顶格输出，让编辑器自动处理缩进。"
             )
+        # 协议必须是最后一条指令，避免被用户的 system_prompt 覆盖
+        system_content += _ANSWER_PROTOCOL
 
         payload = {
             "model": self.config.model,
@@ -258,13 +279,15 @@ class Typer:
 # 托盘管理器
 # ---------------------------------------------------------------------------
 class TrayManager:
+    TITLE = "C Helper — Ctrl+Alt+G"
+
     def __init__(self, on_reset: Callable[[], None], on_quit: Callable[[], None]):
         self.icon: Optional[pystray.Icon] = None
         self._on_reset = on_reset
         self._on_quit = on_quit
         self._lock = threading.Lock()
         self._state = State.IDLE
-        self._pending_state: Optional[State] = None
+        self._answer: Answer | None = None
 
     def build(self) -> pystray.Icon:
         menu = pystray.Menu(
@@ -272,30 +295,37 @@ class TrayManager:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda _i, _it: self._on_quit()),
         )
-        self.icon = pystray.Icon(
+        with self._lock:
+            state = self._state
+            answer = self._answer
+        icon = pystray.Icon(
             "c_helper",
-            IconRenderer.render(State.IDLE),
-            title="C Helper — Ctrl+Alt+G",
+            IconRenderer.render(state, answer),
+            title=self.TITLE,
             menu=menu,
         )
-        # 应用启动前缓存的状态
+        # 构建期间状态/答案可能已经变化，用锁内最新值再绘一次
         with self._lock:
-            if self._pending_state is not None:
-                self.icon.icon = IconRenderer.render(self._pending_state)
-                self.icon.title = f"C Helper — {self._pending_state.name}"
-                self._pending_state = None
-        return self.icon
+            self.icon = icon
+            icon.icon = IconRenderer.render(self._state, self._answer)
+            icon.title = self.TITLE
+        return icon
 
     def set_state(self, state: State) -> None:
         with self._lock:
             if self._state == state:
                 return
             self._state = state
-            if self.icon is None:
-                self._pending_state = state
-                return
-        self.icon.icon = IconRenderer.render(state)
-        self.icon.title = f"C Helper — {state.name}"
+            if self.icon is not None:
+                self.icon.icon = IconRenderer.render(state, self._answer)
+                self.icon.title = self.TITLE
+
+    def set_answer(self, answer: Answer | None) -> None:
+        with self._lock:
+            self._answer = answer
+            if self.icon is not None and self._state is State.READY:
+                self.icon.icon = IconRenderer.render(self._state, answer)
+                self.icon.title = self.TITLE
 
     def run(self) -> None:
         # Windows 要求：Icon 创建和 run() 必须在同一线程
@@ -320,6 +350,7 @@ class Worker:
         self.typer = Typer(config)
         self.q: queue.Queue[Callable[[], None]] = queue.Queue()
         self._cached_answer: str = ""
+        self._answer: Answer | None = None
         self._manual_answer: str = ""
         self._manual_idx: int = 0
         self._manual_active: bool = False
@@ -350,7 +381,13 @@ class Worker:
         if state is State.IDLE:
             log.debug("正在检测 API，忽略热键")
         elif state is State.READY:
-            if self._cached_answer:
+            if self._answer is not None and self._answer.kind in (
+                AnswerKind.SINGLE,
+                AnswerKind.BOOLEAN,
+            ):
+                # 单选题/判断题只显示，第二次热键重新请求，绝不打字
+                self._do_request()
+            elif self._cached_answer:
                 if self.config.typing_mode == "manual":
                     self._start_manual()
                 else:
@@ -365,6 +402,11 @@ class Worker:
     def _do_request(self) -> None:
         if not self.sm.transition(State.REQUESTING):
             return
+
+        # 清空旧答案，避免请求期间残留上一题的选择/判断行
+        self._cached_answer = ""
+        self._answer = None
+        self.tray.set_answer(None)
         self.tray.set_state(State.REQUESTING)
 
         try:
@@ -372,17 +414,32 @@ class Worker:
             if not text.strip():
                 raise ValueError("剪贴板为空或无有效内容")
 
-            answer = self.ai.ask(text)
-            if not answer:
+            raw = self.ai.ask(text)
+            if not raw:
                 raise ValueError("AI 返回空内容")
 
-            self._cached_answer = answer
+            answer = parse_answer(raw, text)
+            if answer is None:
+                # 选择题/判断题解析失败：保持就绪，不打字，可再按热键重试
+                self._cached_answer = ""
+                self._answer = None
+                self.tray.set_answer(None)
+                self.sm.transition(State.READY)
+                self.tray.set_state(State.READY)
+                log.warning("答案解析失败或不可显示，保持就绪；请重试")
+                return
+
+            self._answer = answer
+            self._cached_answer = answer.text
+            self.tray.set_answer(answer)
             self.sm.transition(State.READY)
             self.tray.set_state(State.READY)
-            log.info("答案已就绪，长度 %d", len(answer))
+            log.info("答案已就绪: %s，长度 %d", answer.kind.name, len(answer.text))
         except Exception as e:
             log.error("请求失败: %s", e)
             self._cached_answer = ""
+            self._answer = None
+            self.tray.set_answer(None)
             self.sm.transition(State.ERROR)
             self.tray.set_state(State.ERROR)
 
@@ -405,6 +462,8 @@ class Worker:
             log.error("键盘模拟失败: %s", e)
         finally:
             self._cached_answer = ""
+            self._answer = None
+            self.tray.set_answer(None)
             self.sm.transition(State.READY)
             self.tray.set_state(State.READY)
             log.info("输出完成，系统就绪")
@@ -441,15 +500,19 @@ class Worker:
         self._manual_answer = ""
         self._manual_idx = 0
         self._cached_answer = ""
+        self._answer = None
+        self.tray.set_answer(None)
         self.sm.transition(State.READY)
         self.tray.set_state(State.READY)
         log.info("手动输出完成")
 
     def force_reset(self) -> None:
         self._cached_answer = ""
+        self._answer = None
         self._manual_answer = ""
         self._manual_idx = 0
         self._manual_active = False
+        self.tray.set_answer(None)
         self.sm.force_reset()
         self.tray.set_state(State.IDLE)
 

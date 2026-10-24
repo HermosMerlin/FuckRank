@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from c_helper.core import Config, IconRenderer, State, StateMachine
+from c_helper.core import (
+    Answer,
+    AnswerKind,
+    Config,
+    IconRenderer,
+    State,
+    StateMachine,
+    parse_answer,
+)
 
 
 class TestConfig:
@@ -78,6 +86,111 @@ class TestConfig:
         assert "system_prompt" in data
         assert cfg.base_url == ""
         assert cfg.model == ""
+
+
+class TestParseAnswer:
+    def test_code_without_marker(self) -> None:
+        raw = "int main() { return 0; }"
+        answer = parse_answer(raw, "写一个C程序")
+        assert answer is not None
+        assert answer.kind is AnswerKind.CODE
+        assert answer.text == raw
+
+    def test_choice_single(self) -> None:
+        answer = parse_answer("[[CHOICE:A]]", "以下说法正确的是")
+        assert answer is not None
+        assert answer.kind is AnswerKind.SINGLE
+        assert answer.text == "A"
+        assert answer.choices == ("A",)
+
+    def test_choice_trailing_text_is_ignored(self) -> None:
+        answer = parse_answer("[[CHOICE:B]] 因为选项 B 正确", "单选题")
+        assert answer is not None
+        assert answer.kind is AnswerKind.SINGLE
+        assert answer.text == "B"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "[[MULTI:AC]]",
+            "[[MULTI:A]]",
+            "[[MULTI:A,C]]",
+            "[[MULTI:A、C]]",
+            "[[ＭＵＬＴＩ：ＡＣ]]",
+            "［［ＭＵＬＴＩ：ＡＣ］］",
+            "[[CHOICE:AC]]",
+            "[[CHOICE:AB]]",
+        ],
+    )
+    def test_multi_is_unsupported(self, raw: str) -> None:
+        assert parse_answer(raw, "多选题") is None
+
+    def test_full_width_single_choice(self) -> None:
+        answer = parse_answer("［［ＣＨＯＩＣＥ：Ａ］］", "单选题")
+        assert answer is not None
+        assert answer.kind is AnswerKind.SINGLE
+        assert answer.text == "A"
+
+    def test_lowercase_single_choice(self) -> None:
+        answer = parse_answer("[[choice:b]]", "单选题")
+        assert answer is not None
+        assert answer.kind is AnswerKind.SINGLE
+        assert answer.text == "B"
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("[[BOOL:T]]", True),
+            ("[[BOOL:TRUE]]", True),
+            ("[[BOOL:正确]]", True),
+            ("[[BOOL:√]]", True),
+            ("[[BOOL:F]]", False),
+            ("[[BOOL:FALSE]]", False),
+            ("[[BOOL:错误]]", False),
+            ("[[BOOL:×]]", False),
+        ],
+    )
+    def test_boolean_variants(self, raw: str, expected: bool) -> None:
+        answer = parse_answer(raw, "判断题")
+        assert answer is not None
+        assert answer.kind is AnswerKind.BOOLEAN
+        assert answer.value is expected
+        assert answer.text == ("正确" if expected else "错误")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "[[CHOICE:E]]",
+            "[[MULTI:AE]]",
+            "[[CHOICE:]]",
+            "[[BOOL:maybe]]",
+            "[[UNSUPPORTED]]",
+        ],
+    )
+    def test_invalid_payload_returns_none(self, raw: str) -> None:
+        assert parse_answer(raw, "题目") is None
+
+    def test_no_marker_choice_like_returns_none(self) -> None:
+        question = "单选题\nA. 1\nB. 2\nC. 3\nD. 4"
+        assert parse_answer("答案是 A", question) is None
+
+    def test_no_marker_boolean_like_returns_none(self) -> None:
+        question = "判断题：1+1=2"
+        assert parse_answer("正确", question) is None
+
+    def test_marker_on_later_line_is_treated_as_no_marker(self) -> None:
+        question = "单选题\nA. 1\nB. 2\nC. 3\nD. 4"
+        assert parse_answer("答案：\n[[CHOICE:A]]", question) is None
+
+    def test_code_marker_is_stripped(self) -> None:
+        raw = "[[CODE]]\nint main() { return 0; }"
+        answer = parse_answer(raw, "写一个C程序")
+        assert answer is not None
+        assert answer.kind is AnswerKind.CODE
+        assert answer.text == "int main() { return 0; }"
+
+    def test_empty_response_returns_none(self) -> None:
+        assert parse_answer("   ", "题目") is None
 
 
 class TestStateMachine:
@@ -175,3 +288,85 @@ class TestIconRenderer:
         # 即使传入不存在的 key，也应该返回 IDLE 颜色
         img = IconRenderer.render(State.IDLE)
         assert img.size == (16, 16)
+
+
+class TestIconRendererAnswerRow:
+    SELECTED = (0x22, 0xC5, 0x5E)
+    SOCKET = (0x47, 0x55, 0x69)
+    CLOUD = (0x94, 0xA3, 0xB8)
+    XS = (("A", 1), ("B", 5), ("C", 9), ("D", 13))
+
+    @pytest.mark.parametrize("key,x", XS)
+    def test_single_choice_positions(self, key: str, x: int) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.SINGLE, key, choices=(key,)),
+        )
+        assert img.getpixel((x, 10))[:3] == self.SELECTED
+        for other_key, other_x in self.XS:
+            if other_key != key:
+                assert img.getpixel((other_x, 10))[:3] == self.SOCKET
+
+    def test_choice_dots_are_same_size(self) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.SINGLE, "A", choices=("A",)),
+        )
+        for y in range(10, 13):
+            for x in range(1, 4):
+                assert img.getpixel((x, y))[:3] == self.SELECTED
+            for x in range(5, 8):
+                assert img.getpixel((x, y))[:3] == self.SOCKET
+
+    def test_boolean_true_left_lit(self) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.BOOLEAN, "正确", value=True),
+        )
+        assert img.getpixel((3, 9))[:3] == self.SELECTED
+        assert img.getpixel((8, 9))[:3] == self.SOCKET
+
+    def test_boolean_false_right_lit(self) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.BOOLEAN, "错误", value=False),
+        )
+        assert img.getpixel((3, 9))[:3] == self.SOCKET
+        assert img.getpixel((8, 9))[:3] == self.SELECTED
+
+    def test_boolean_dots_are_same_size(self) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.BOOLEAN, "正确", value=True),
+        )
+        for y in range(9, 14):
+            for x in range(3, 8):
+                assert img.getpixel((x, y))[:3] == self.SELECTED
+            for x in range(8, 13):
+                assert img.getpixel((x, y))[:3] == self.SOCKET
+
+    def test_code_answer_keeps_status_dot(self) -> None:
+        img = IconRenderer.render(
+            State.READY,
+            Answer(AnswerKind.CODE, "int main() {}"),
+        )
+        assert img.getpixel((1, 10))[:3] == self.CLOUD
+        assert img.getpixel((12, 12))[:3] == (0x6B, 0xCB, 0x9F)
+
+    def test_answer_row_only_in_ready(self) -> None:
+        img = IconRenderer.render(
+            State.REQUESTING,
+            Answer(AnswerKind.SINGLE, "A", choices=("A",)),
+        )
+        assert img.getpixel((1, 10))[:3] == self.CLOUD
+        assert img.getpixel((12, 12))[:3] == (0xD4, 0xA3, 0x73)
+
+    def test_four_single_choices_are_unique(self) -> None:
+        images = {
+            IconRenderer.render(
+                State.READY,
+                Answer(AnswerKind.SINGLE, key, choices=(key,)),
+            ).tobytes()
+            for key in "ABCD"
+        }
+        assert len(images) == 4

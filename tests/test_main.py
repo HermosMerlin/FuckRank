@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from c_helper.core import Config, State
+from c_helper.core import Answer, AnswerKind, Config, State
 from c_helper.main import AIClient, App, HotkeyManager, TrayManager, Typer, Worker
 
 
@@ -68,6 +68,43 @@ class TestAIClient:
         client = AIClient(config)
         with pytest.raises(ValueError, match="空 choices"):
             client.ask("hello")
+
+    @patch("c_helper.main.requests.Session")
+    def test_ask_appends_answer_protocol_last(self, mock_session_cls) -> None:
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "int main() {}"}}]
+        }
+        mock_session.post.return_value = mock_resp
+
+        config = Config(
+            api_key="sk-test",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4",
+            typing_delay_ms=80,
+            typing_jitter=True,
+            typing_jitter_range_ms=20,
+            long_pause_enabled=False,
+            long_pause_chance=0.0,
+            long_pause_min_ms=3000,
+            long_pause_max_ms=12000,
+            output_mode="optimized",
+            editor_auto_brace=False,
+            system_prompt="test",
+        )
+        client = AIClient(config)
+        client.ask("题目")
+
+        system = mock_session.post.call_args[1]["json"]["messages"][0]["content"]
+        assert "[[CHOICE:" in system
+        assert "[[MULTI:" not in system
+        assert "[[BOOL:" in system
+        assert "[[UNSUPPORTED]]" in system
+        assert "多选题" in system
+        # 协议指令必须排在 K&R 指令之后，成为最后一条指令
+        assert system.index("先判断题目类型") > system.index("K&R")
 
 
 class TestTyper:
@@ -230,6 +267,171 @@ class TestWorker:
         mock_typer.type_text.assert_called_once_with("printf('hello');")
         assert worker._cached_answer == ""
         sm.transition.assert_called_with(State.READY)
+
+
+class TestWorkerChoiceAnswers:
+    def _config(self, **overrides) -> Config:
+        values = dict(
+            api_key="sk",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4",
+            typing_delay_ms=80,
+            typing_jitter=True,
+            typing_jitter_range_ms=20,
+            long_pause_enabled=False,
+            long_pause_chance=0.0,
+            long_pause_min_ms=3000,
+            long_pause_max_ms=12000,
+            output_mode="optimized",
+            editor_auto_brace=False,
+            system_prompt="test",
+            typing_mode="manual",
+        )
+        values.update(overrides)
+        return Config(**values)
+
+    def _worker(self, state=State.IDLE, **overrides):
+        sm = MagicMock()
+        sm.state = state
+        sm.transition.return_value = True
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        worker = Worker(self._config(**overrides), sm, tray)
+        worker.ai = MagicMock()
+        return worker, sm, tray
+
+    @patch("c_helper.main.safe_paste")
+    def test_do_request_parses_single_choice(self, mock_paste) -> None:
+        worker, sm, _tray = self._worker()
+        mock_paste.return_value = "单选题\nA. 1\nB. 2\nC. 3\nD. 4"
+        worker.ai.ask.return_value = "[[CHOICE:A]]"
+
+        worker._do_request()
+
+        assert worker._answer is not None
+        assert worker._answer.kind is AnswerKind.SINGLE
+        assert worker._cached_answer == "A"
+        sm.transition.assert_any_call(State.REQUESTING)
+        sm.transition.assert_any_call(State.READY)
+
+    @patch("c_helper.main.safe_paste")
+    def test_do_request_parses_boolean(self, mock_paste) -> None:
+        worker, _sm, _tray = self._worker()
+        mock_paste.return_value = "判断题：1+1=2"
+        worker.ai.ask.return_value = "[[BOOL:F]]"
+
+        worker._do_request()
+
+        assert worker._answer is not None
+        assert worker._answer.kind is AnswerKind.BOOLEAN
+        assert worker._answer.value is False
+        assert worker._cached_answer == "错误"
+
+    @patch("c_helper.main.safe_paste")
+    def test_do_request_soft_fails_choice_without_marker(self, mock_paste) -> None:
+        worker, sm, _tray = self._worker()
+        mock_paste.return_value = "多选题\nA. 1\nB. 2\nC. 3\nD. 4"
+        worker.ai.ask.return_value = "答案是 A 和 C"
+
+        worker._do_request()
+
+        assert worker._answer is None
+        assert worker._cached_answer == ""
+        states = [call.args[0] for call in sm.transition.call_args_list]
+        assert State.READY in states
+        assert State.ERROR not in states
+
+    @patch("c_helper.main.safe_paste")
+    def test_do_request_soft_fails_multi_marker(self, mock_paste) -> None:
+        worker, sm, _tray = self._worker()
+        mock_paste.return_value = "多选题\nA. 1\nB. 2\nC. 3\nD. 4"
+        worker.ai.ask.return_value = "[[MULTI:AC]]"
+
+        worker._do_request()
+
+        assert worker._answer is None
+        assert worker._cached_answer == ""
+        states = [call.args[0] for call in sm.transition.call_args_list]
+        assert State.READY in states
+        assert State.ERROR not in states
+
+    def test_handle_hotkey_re_requests_choice(self) -> None:
+        worker, _sm, _tray = self._worker(state=State.READY)
+        worker._answer = Answer(AnswerKind.SINGLE, "A", choices=("A",))
+        worker._cached_answer = "A"
+
+        with patch.object(worker, "_do_request") as mock_request, patch.object(
+            worker, "_do_type"
+        ) as mock_type:
+            worker.handle_hotkey()
+
+        mock_request.assert_called_once()
+        mock_type.assert_not_called()
+
+    def test_handle_hotkey_types_code_answer(self) -> None:
+        worker, _sm, _tray = self._worker(state=State.READY, typing_mode="auto")
+        worker._answer = Answer(AnswerKind.CODE, "int main() {}")
+        worker._cached_answer = "int main() {}"
+
+        with patch.object(worker, "_do_request") as mock_request, patch.object(
+            worker, "_do_type"
+        ) as mock_type:
+            worker.handle_hotkey()
+
+        mock_type.assert_called_once()
+        mock_request.assert_not_called()
+
+    def test_force_reset_clears_answer(self) -> None:
+        worker, _sm, _tray = self._worker(state=State.READY)
+        worker._answer = Answer(AnswerKind.SINGLE, "A", choices=("A",))
+        worker._cached_answer = "A"
+
+        worker.force_reset()
+
+        assert worker._answer is None
+        assert worker._cached_answer == ""
+
+    @patch("c_helper.main.time.sleep")
+    @patch.object(TrayManager, "set_state")
+    def test_do_type_clears_answer(self, mock_set_state, mock_sleep) -> None:
+        worker, sm, _tray = self._worker(state=State.READY)
+        worker._answer = Answer(AnswerKind.CODE, "printf('x');")
+        worker._cached_answer = "printf('x');"
+        worker.typer = MagicMock()
+
+        worker._do_type()
+
+        assert worker._answer is None
+        assert worker._cached_answer == ""
+        sm.transition.assert_called_with(State.READY)
+
+
+class TestTrayManager:
+    @patch("c_helper.main.pystray.Icon")
+    def test_build_uses_constant_title(self, mock_icon_cls) -> None:
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        tray.build()
+        assert mock_icon_cls.call_args.kwargs["title"] == "C Helper — Ctrl+Alt+G"
+
+    @patch("c_helper.main.pystray.Icon")
+    def test_set_state_keeps_constant_title(self, mock_icon_cls) -> None:
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        tray.build()
+        tray.set_state(State.REQUESTING)
+        assert tray.icon is not None
+        assert tray.icon.title == "C Helper — Ctrl+Alt+G"
+
+    @patch("c_helper.main.IconRenderer.render")
+    @patch("c_helper.main.pystray.Icon")
+    def test_set_answer_rerenders_when_ready(self, mock_icon_cls, mock_render) -> None:
+        tray = TrayManager(on_reset=lambda: None, on_quit=lambda: None)
+        tray.build()
+        tray.set_state(State.READY)
+        mock_render.reset_mock()
+
+        answer = Answer(AnswerKind.SINGLE, "A", choices=("A",))
+        tray.set_answer(answer)
+
+        mock_render.assert_called_once_with(State.READY, answer)
 
 
 class TestAppInitialization:
